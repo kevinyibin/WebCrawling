@@ -40,7 +40,6 @@ def main():
     
     # 确保数据目录存在
     os.makedirs('data', exist_ok=True)
-    # os.makedirs('logs', exist_ok=True)  # 已在文件开头创建logs目录
     
     # 加载配置
     config = load_config(args.config)

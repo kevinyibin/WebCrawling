@@ -13,7 +13,7 @@ from transformers import AutoTokenizer, AutoModelForSequenceClassification
 import torch
 
 logger = logging.getLogger(__name__)
-
+tech_specs = {}
 class DataCleaner:
     """
     数据清洗类，负责从爬取的网页中提取产品信息
@@ -171,27 +171,92 @@ class DataCleaner:
         Returns:
             str: 产品名称
         """
-        # 尝试从标题中提取
-        title = soup.title.text if soup.title else ''
+        logger.debug(f"开始提取产品名称，URL: {url}")
+        product_name = None
         
-        # 尝试从h1标签中提取
-        h1_tags = soup.find_all('h1')
-        for h1 in h1_tags:
-            text = h1.text.strip()
-            if any(keyword in text.lower() for keyword in ['无人机', 'drone', 'uav']):
-                return text
+        # 1. 尝试从元标签中提取
+        meta_tags = [
+            soup.find('meta', property='og:title'),
+            soup.find('meta', attrs={'name': 'title'}),
+            soup.find('meta', attrs={'name': 'product:title'}),
+            soup.find('meta', attrs={'name': 'twitter:title'})
+        ]
         
-        # 尝试从URL中提取
-        url_parts = url.split('/')
-        for part in url_parts:
-            if any(keyword in part.lower() for keyword in ['product', 'drone', 'uav']):
-                # 清理URL部分，将连字符和下划线替换为空格
-                cleaned_part = re.sub(r'[-_]', ' ', part)
-                if cleaned_part and len(cleaned_part) > 3:  # 避免过短的名称
-                    return cleaned_part.title()
+        for meta in meta_tags:
+            if meta and meta.get('content'):
+                content = meta.get('content').strip()
+                if content and len(content) > 3:
+                    logger.debug(f"从元标签提取到产品名称: {content}")
+                    product_name = content
+                    break
         
-        # 如果无法提取，则返回标题
-        return title
+        # 2. 尝试从产品名称特定的HTML结构中提取
+        if not product_name:
+            product_selectors = [
+                soup.find('h1', class_=lambda c: c and any(word in str(c).lower() for word in ['product-name', 'product-title', 'product_name', 'product_title', 'productname', 'producttitle'])),
+                soup.find('div', class_=lambda c: c and any(word in str(c).lower() for word in ['product-name', 'product-title', 'product_name', 'product_title', 'productname', 'producttitle'])),
+                soup.find('span', class_=lambda c: c and any(word in str(c).lower() for word in ['product-name', 'product-title', 'product_name', 'product_title', 'productname', 'producttitle']))
+            ]
+            
+            for selector in product_selectors:
+                if selector:
+                    text = selector.text.strip()
+                    if text and len(text) > 3:
+                        logger.debug(f"从产品名称选择器提取到: {text}")
+                        product_name = text
+                        break
+        
+        # 3. 尝试从标题中提取
+        if not product_name and soup.title:
+            title = soup.title.text.strip()
+            # 移除常见的网站名称后缀
+            title = re.sub(r'\s*[\|\-–—_]\s*.*$', '', title)
+            if title and len(title) > 3:
+                logger.debug(f"从页面标题提取到: {title}")
+                product_name = title
+        
+        # 4. 尝试从h1标签中提取
+        if not product_name:
+            h1_tags = soup.find_all('h1')
+            for h1 in h1_tags:
+                text = h1.text.strip()
+                # 检查是否包含无人机相关关键词
+                if any(keyword in text.lower() for keyword in ['无人机', 'drone', 'uav', 'quadcopter', 'copter', 'aircraft']):
+                    logger.debug(f"从h1标签提取到产品名称: {text}")
+                    product_name = text
+                    break
+                # 如果只有一个h1标签，且长度适中，也可能是产品名称
+                elif len(h1_tags) == 1 and 3 < len(text) < 50:
+                    logger.debug(f"从唯一h1标签提取到可能的产品名称: {text}")
+                    product_name = text
+                    break
+        
+        # 5. 尝试从URL中提取
+        if not product_name:
+            url_parts = url.split('/')
+            for part in url_parts:
+                if any(keyword in part.lower() for keyword in ['product', 'drone', 'uav', 'model']):
+                    # 清理URL部分，将连字符和下划线替换为空格
+                    cleaned_part = re.sub(r'[-_]', ' ', part)
+                    if cleaned_part and len(cleaned_part) > 3:  # 避免过短的名称
+                        logger.debug(f"从URL提取到产品名称: {cleaned_part.title()}")
+                        product_name = cleaned_part.title()
+                        break
+        
+        # 如果仍然无法提取，使用页面标题
+        if not product_name and soup.title:
+            product_name = soup.title.text.strip()
+            logger.debug(f"使用页面标题作为产品名称: {product_name}")
+        
+        # 清理产品名称
+        if product_name:
+            # 移除多余空白字符
+            product_name = re.sub(r'\s+', ' ', product_name).strip()
+            # 移除常见的无关后缀
+            product_name = re.sub(r'\s*[\|\-–—_]\s*(官方网站|官网|详情|规格|参数|价格|购买|订购|商城|商店|专卖店).*$', '', product_name)
+        
+        logger.debug(f"最终提取的产品名称: {product_name}")
+        return product_name if product_name else ''
     
     def _extract_product_description(self, soup):
         """
@@ -234,61 +299,257 @@ class DataCleaner:
             soup: BeautifulSoup对象
             
         Returns:
-            dict: 产品技术规格字典
+            str: 产品技术规格文本
         """
-        tech_specs = {}
+        tech_specs_text = ""
+        logger.debug("开始提取产品技术规格")
         
-        # 尝试查找技术规格表格
-        tables = soup.find_all('table')
+        # 技术规格相关关键词
+        spec_keywords = [
+            '技术参数', '技术规格', '产品规格', '规格参数', '性能参数', '产品参数', '参数配置', 
+            '技术指标', '产品特性', '功能特点', '详细参数', '详细规格', '产品参数', '基本参数',
+            'specifications', 'technical data', 'parameters', 'performance', 'tech specs',
+            'technical specifications', 'product specifications', 'spec sheet'
+        ]
+        
+        # 1. 查找专门的技术规格区域
+        spec_containers = []
+        
+        # 查找可能包含技术规格的容器元素
+        for keyword in spec_keywords:
+            # 通过ID查找
+            elements = soup.find_all(id=lambda i: i and keyword.lower() in i.lower())
+            spec_containers.extend(elements)
+            
+            # 通过class查找
+            elements = soup.find_all(class_=lambda c: c and keyword.lower() in c.lower())
+            spec_containers.extend(elements)
+            
+            # 通过标题查找
+            headings = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
+            for heading in headings:
+                if keyword.lower() in heading.text.lower():
+                    # 获取标题后面的元素作为可能的规格容器
+                    next_element = heading.find_next_sibling()
+                    if next_element:
+                        spec_containers.append(next_element)
+        
+        # 2. 从表格中提取技术规格
+        tables = []
+        
+        # 首先查找专门的规格表格
+        for container in spec_containers:
+            container_tables = container.find_all('table')
+            tables.extend(container_tables)
+        
+        # 如果没有找到，查找所有表格
+        if not tables:
+            tables = soup.find_all('table')
+        
         for table in tables:
             # 检查表格是否包含技术规格关键词
             table_text = table.text.lower()
-            if any(keyword in table_text for keyword in ['技术参数', '规格', 'specification', 'parameter']):
+            is_spec_table = any(keyword.lower() in table_text for keyword in spec_keywords)
+            
+            # 如果表格在规格容器中或包含规格关键词
+            if is_spec_table or any(container in spec_containers for container in table.parents):
+                logger.debug(f"找到可能的技术规格表格")
+                
                 # 提取表格中的行
                 rows = table.find_all('tr')
                 for row in rows:
                     # 提取行中的单元格
                     cells = row.find_all(['td', 'th'])
+                    
+                    # 处理2列表格 (键-值对)
                     if len(cells) >= 2:
                         key = cells[0].text.strip()
                         value = cells[1].text.strip()
-                        if key and value:
+                        
+                        # 清理和验证键值对
+                        key = re.sub(r'\s+', ' ', key)
+                        value = re.sub(r'\s+', ' ', value)
+                        
+                        if key and value and len(key) < 100 and not key.isdigit():
+                            # 移除键中的常见后缀
+                            key = re.sub(r'[：:*]\s*$', '', key)
+                            logger.debug(f"从表格提取: {key} -> {value}")
                             tech_specs[key] = value
+                    
+                    # 处理多列表格 (尝试识别表头和数据)
+                    elif len(cells) > 2:
+                        # 尝试识别第一行是否为表头
+                        if row.find_parent('thead') or all(cell.name == 'th' for cell in cells):
+                            continue  # 跳过表头行
+                        
+                        # 尝试从同一表格中找到表头行
+                        header_row = None
+                        for potential_header in table.find_all('tr'):
+                            if potential_header.find('th') and potential_header != row:
+                                header_row = potential_header
+                                break
+                        
+                        if header_row:
+                            header_cells = header_row.find_all(['th', 'td'])
+                            # 确保表头单元格数量与数据单元格数量匹配
+                            if len(header_cells) == len(cells):
+                                for i in range(len(cells)):
+                                    key = header_cells[i].text.strip()
+                                    value = cells[i].text.strip()
+                                    if key and value and key != value and len(key) < 100 and not key.isdigit():
+                                        key = re.sub(r'[：:*]\s*$', '', key)
+                                        logger.debug(f"从多列表格提取: {key} -> {value}")
+                                        tech_specs[key] = value
         
-        # 尝试查找技术规格列表
-        if not tech_specs:
-            # 查找可能包含技术规格的列表
-            spec_lists = soup.find_all(['ul', 'ol'], class_=lambda c: c and any(word in c.lower() for word in ['spec', 'parameter', 'tech']))
+        # 3. 从定义列表(dl/dt/dd)中提取技术规格
+        dl_elements = []
+        
+        # 首先查找规格容器中的定义列表
+        for container in spec_containers:
+            container_dls = container.find_all('dl')
+            dl_elements.extend(container_dls)
+        
+        # 如果没有找到，查找所有定义列表
+        if not dl_elements:
+            dl_elements = soup.find_all('dl')
+        
+        for dl in dl_elements:
+            dt_elements = dl.find_all('dt')
+            dd_elements = dl.find_all('dd')
             
-            for spec_list in spec_lists:
-                list_items = spec_list.find_all('li')
-                for item in list_items:
-                    text = item.text.strip()
-                    # 尝试从列表项中提取键值对
-                    match = re.search(r'([^:：]+)[：:](.*)', text)
-                    if match:
-                        key = match.group(1).strip()
-                        value = match.group(2).strip()
-                        if key and value:
-                            tech_specs[key] = value
+            # 确保dt和dd元素数量匹配
+            if len(dt_elements) == len(dd_elements):
+                for i in range(len(dt_elements)):
+                    key = dt_elements[i].text.strip()
+                    value = dd_elements[i].text.strip()
+                    if key and value and len(key) < 100 and not key.isdigit():
+                        key = re.sub(r'[：:*]\s*$', '', key)
+                        logger.debug(f"从定义列表提取: {key} -> {value}")
+                        tech_specs[key] = value
         
-        # 尝试从段落中提取技术规格
-        if not tech_specs:
-            # 查找可能包含技术规格的段落
-            spec_paragraphs = soup.find_all(['p', 'div'], class_=lambda c: c and any(word in c.lower() for word in ['spec', 'parameter', 'tech']))
+        # 4. 从列表中提取技术规格
+        spec_lists = []
+        
+        # 首先查找规格容器中的列表
+        for container in spec_containers:
+            container_lists = container.find_all(['ul', 'ol'])
+            spec_lists.extend(container_lists)
+        
+        # 如果没有找到，查找可能包含技术规格的列表
+        if not spec_lists:
+            spec_lists = soup.find_all(['ul', 'ol'], class_=lambda c: c and any(word in str(c).lower() for word in ['spec', 'parameter', 'tech', 'feature']))
+        
+        # 如果仍然没有找到，查找所有列表
+        if not spec_lists:
+            # 查找所有列表，但要求在规格相关区域附近
+            for keyword in spec_keywords:
+                for heading in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']):
+                    if keyword.lower() in heading.text.lower():
+                        next_list = heading.find_next(['ul', 'ol'])
+                        if next_list:
+                            spec_lists.append(next_list)
+        
+        for spec_list in spec_lists:
+            list_items = spec_list.find_all('li')
+            for item in list_items:
+                text = item.text.strip()
+                # 尝试从列表项中提取键值对
+                match = re.search(r'([^:：]+)[：:](.*)', text)
+                if match:
+                    key = match.group(1).strip()
+                    value = match.group(2).strip()
+                    if key and value and len(key) < 100 and not key.isdigit():
+                        key = re.sub(r'[：:*]\s*$', '', key)
+                        logger.debug(f"从列表项提取: {key} -> {value}")
+                        tech_specs[key] = value
+        
+        # 5. 从段落和div中提取技术规格
+        spec_paragraphs = []
+        
+        # 首先查找规格容器中的段落
+        for container in spec_containers:
+            container_paragraphs = container.find_all(['p', 'div'])
+            spec_paragraphs.extend(container_paragraphs)
+        
+        # 如果没有找到，查找可能包含技术规格的段落
+        if not spec_paragraphs:
+            spec_paragraphs = soup.find_all(['p', 'div'], class_=lambda c: c and any(word in str(c).lower() for word in ['spec', 'parameter', 'tech', 'feature']))
+        
+        for paragraph in spec_paragraphs:
+            text = paragraph.text.strip()
+            # 尝试从段落中提取键值对
+            for line in text.split('\n'):
+                # 使用更复杂的正则表达式匹配各种格式的键值对
+                match = re.search(r'([^:：]+)[：:\s]*([^\n]+)', line)
+                if match:
+                    key = match.group(1).strip()
+                    value = match.group(2).strip()
+                    if key and value and len(key) < 100 and not key.isdigit():
+                        key = re.sub(r'[：:*]\s*$', '', key)
+                        logger.debug(f"从段落提取: {key} -> {value}")
+                        tech_specs[key] = value
+        
+        # 6. 查找具有特定格式的div元素（常见于产品规格展示）
+        spec_divs = soup.find_all('div', class_=lambda c: c and any(word in str(c).lower() for word in ['spec-item', 'param-item', 'feature-item']))
+        for div in spec_divs:
+            # 查找可能的键值对元素
+            key_element = div.find(class_=lambda c: c and any(word in str(c).lower() for word in ['name', 'key', 'label', 'title']))
+            value_element = div.find(class_=lambda c: c and any(word in str(c).lower() for word in ['value', 'data', 'content']))
             
-            for paragraph in spec_paragraphs:
-                text = paragraph.text.strip()
-                # 尝试从段落中提取键值对
-                for line in text.split('\n'):
-                    match = re.search(r'([^:：]+)[：:](.*)', line)
-                    if match:
-                        key = match.group(1).strip()
-                        value = match.group(2).strip()
-                        if key and value:
-                            tech_specs[key] = value
+            if key_element and value_element:
+                key = key_element.text.strip()
+                value = value_element.text.strip()
+                if key and value and len(key) < 100 and not key.isdigit():
+                    key = re.sub(r'[：:*]\s*$', '', key)
+                    logger.debug(f"从特殊div提取: {key} -> {value}")
+                    tech_specs[key] = value
         
-        return tech_specs
+        # 将提取的技术规格区域内容合并为纯文本
+        tech_specs_text = ""
+        
+        # 1. 从规格容器中提取文本
+        for container in spec_containers:
+            container_text = container.get_text(separator='\n', strip=True)
+            if container_text:
+                tech_specs_text += container_text + "\n\n"
+        
+        # 2. 从表格中提取文本
+        for table in tables:
+            table_text = table.get_text(separator='\n', strip=True)
+            if table_text:
+                tech_specs_text += table_text + "\n\n"
+        
+        # 3. 从定义列表中提取文本
+        for dl in dl_elements:
+            dl_text = dl.get_text(separator='\n', strip=True)
+            if dl_text:
+                tech_specs_text += dl_text + "\n\n"
+        
+        # 4. 从列表中提取文本
+        for spec_list in spec_lists:
+            list_text = spec_list.get_text(separator='\n', strip=True)
+            if list_text:
+                tech_specs_text += list_text + "\n\n"
+        
+        # 5. 从段落和div中提取文本
+        for paragraph in spec_paragraphs:
+            para_text = paragraph.get_text(strip=True)
+            if para_text:
+                tech_specs_text += para_text + "\n"
+        
+        # 6. 从特定格式的div元素中提取文本
+        for div in spec_divs:
+            div_text = div.get_text(separator='\n', strip=True)
+            if div_text:
+                tech_specs_text += div_text + "\n"
+        
+        # 清理文本，移除多余的空行和空格
+        tech_specs_text = re.sub(r'\n{3,}', '\n\n', tech_specs_text)
+        tech_specs_text = re.sub(r'\s+', ' ', tech_specs_text)
+        tech_specs_text = tech_specs_text.strip()
+        
+        logger.debug(f"提取到技术规格文本，长度: {len(tech_specs_text)}")
+        return tech_specs_text
         
     def _clean_page_content(self, page):
         """
@@ -328,6 +589,13 @@ class DataCleaner:
         # 如果没有提取到有效内容，返回None
         if not product_name and not product_description and not tech_specs and not main_content:
             return None
+            
+        # 确保tech_specs是字符串类型
+        if isinstance(tech_specs, dict):
+            # 兼容旧版本的键值对格式，转换为纯文本
+            tech_specs_text = "\n".join([f"{k}: {v}" for k, v in tech_specs.items()])
+        else:
+            tech_specs_text = tech_specs
         
         # 构建清洗后的页面数据
         cleaned_page = {
@@ -335,7 +603,7 @@ class DataCleaner:
             'company': company,
             'product_name': product_name,
             'description': product_description,
-            'tech_specs': tech_specs,
+            'tech_specs': tech_specs_text,
             'content': main_content
         }
         
