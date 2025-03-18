@@ -20,7 +20,7 @@ def load_config(config_file):
     config = {
         # 爬虫配置
         'timeout': 30,  # 请求超时时间（秒）
-        'max_pages': 50,  # 每个公司最多爬取的页面数
+        'max_pages': 20,  # 每个公司最多爬取的页面数
         'delay': 1,  # 请求间隔（秒）
         
         # DeepSeek API配置

@@ -13,7 +13,6 @@ from datetime import datetime
 
 from crawler import Crawler
 from data_cleaner import DataCleaner
-from analyzer import Analyzer
 from data_storage import DataStorage
 from config import load_config
 
@@ -34,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 def main():
     # 解析命令行参数
-    parser = argparse.ArgumentParser(description='无人机公司网络爬虫系统')
+    parser = argparse.ArgumentParser(description='公司网络爬虫系统')
     parser.add_argument('--config', type=str, default='config.py', help='配置文件路径')
     parser.add_argument('--company', type=str, help='指定爬取的公司名称')
     args = parser.parse_args()
@@ -58,7 +57,6 @@ def main():
     # 初始化各模块
     crawler = Crawler(config)
     cleaner = DataCleaner()
-    analyzer = Analyzer(config['deepseek_api_key'])
     storage = DataStorage()
     
     # 处理每个公司
@@ -69,18 +67,13 @@ def main():
         raw_data = crawler.crawl(company)
         logger.info(f"爬取完成，获取到 {len(raw_data)} 个页面")
         
-        # 数据清洗，提取产品信息
-        products_data = cleaner.clean(raw_data)
-        logger.info(f"数据清洗完成，提取到 {len(products_data)} 个产品信息")
-        
-        # 使用DeepSeek分析产品特点和应用场景
-        for product in products_data:
-            analysis_result = analyzer.analyze(product)
-            product.update(analysis_result)
+        # 数据清洗，筛选包含产品技术规格的页面
+        product_pages = cleaner.clean(raw_data)
+        logger.info(f"数据清洗完成，筛选出 {len(product_pages)} 个产品页面")
         
         # 存储结果
-        storage.save(company['name'], products_data)
-        logger.info(f"公司 {company['name']} 的数据已保存")
+        storage.save(company['name'], product_pages)
+        logger.info(f"公司 {company['name']} 的原始网页数据已保存")
     
     logger.info("所有任务完成")
 
